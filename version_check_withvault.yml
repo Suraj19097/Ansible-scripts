@@ -1,0 +1,69 @@
+---
+- name: Collect JBoss installations and default version
+  hosts: all
+#become: yes
+  vars:
+    jboss_base_dir: "/jboss"
+    jboss_default_link: "/jboss/jbossas"   # Adjust if using /jboss/jboss-default
+    local_output_file: "./jboss_reports/all_jboss_versions.txt"
+
+  vars_files:
+    - secrets.yml
+
+  tasks:
+    - name: Show username from vault
+      debug:
+        msg: "Vault username: {{ ansible_user }}"
+
+    - name: Find JBoss version directories
+      ansible.builtin.find:
+        paths: "{{ jboss_base_dir }}"
+        patterns: "jboss-eap-*"
+        file_type: directory
+        recurse: no
+      register: jboss_dirs
+
+    - name: Check if default JBoss symlink exists
+      ansible.builtin.stat:
+        path: "{{ jboss_default_link }}"
+      register: jboss_default_stat
+
+    - name: Get target of the default JBoss symlink (if exists)
+      ansible.builtin.command: readlink -f "{{ jboss_default_link }}"
+      register: jboss_default_target
+      when: jboss_default_stat.stat.islnk is defined and jboss_default_stat.stat.islnk
+      changed_when: false
+      failed_when: false
+
+    - name: Build version block for each host
+      ansible.builtin.set_fact:
+        jboss_block: |
+          Server: {{ inventory_hostname }}
+          Installed Versions:
+          {% for f in jboss_dirs.files %}
+          {{ f.path }}
+          {% endfor %}
+          Current Default Version for jboss: {{ jboss_default_target.stdout | default('Not Found') }}
+
+    - name: Ensure local output directory exists
+      ansible.builtin.file:
+        path: "./jboss_reports"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Clear previous report file before writing new data
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ local_output_file }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Append host block to local report file
+      ansible.builtin.blockinfile:
+        path: "{{ local_output_file }}"
+        block: "{{ jboss_block }}"
+        create: yes
+        marker: ""
+      delegate_to: localhost
