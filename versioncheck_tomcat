@@ -1,0 +1,120 @@
+---
+- name: Collect JBoss and Tomcat version details
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    jboss_base_dir: "/jboss"
+    jboss_default_link: "/jboss/jbossas"
+    local_output_file: "./jboss_reports/all_jboss_versions.txt"
+
+  tasks:
+    - name: Ensure local output directory exists
+      ansible.builtin.file:
+        path: "./jboss_reports"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Clear previous report file
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ local_output_file }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Get server hostname
+      command: hostname
+      register: hostname_output
+      changed_when: false
+
+
+    - name: Find all installed JBoss versions
+      ansible.builtin.find:
+        paths: "{{ jboss_base_dir }}"
+        patterns: "jboss-eap-*"
+        file_type: directory
+        recurse: no
+      register: jboss_dirs
+
+    - name: Check if default JBoss symlink exists
+      ansible.builtin.stat:
+        path: "{{ jboss_default_link }}"
+      register: jboss_default_stat
+
+    - name: Get target of default JBoss symlink (if exists)
+      ansible.builtin.command: readlink -f "{{ jboss_default_link }}"
+      when: jboss_default_stat.stat.islnk is defined and jboss_default_stat.stat.islnk
+      register: jboss_default_target
+      changed_when: false
+      failed_when: false
+
+    # ---- Tomcat Checks ----
+    - name: Check if JBoss Tomcat version script exists
+      stat:
+        path: /jboss/jbossas/tomcat/bin/version.sh
+      register: jboss_version_file
+
+    - name: Check if Alfresco Tomcat version script exists
+      stat:
+        path: /opt/alfresco/tomcat/bin/version.sh
+      register: alfresco_version_file
+
+   # - name: Get JBoss Tomcat version
+    #  shell: sh /jboss/jbossas/tomcat/bin/version.sh | grep "Server version" | awk -F': ' '{print $2}'
+
+    - name: Get JBoss Tomcat version
+      shell: |
+        sh /jboss/jbossas/tomcat/bin/version.sh | grep "Server version" | awk -F': ' '{print $2}'
+      when: jboss_version_file.stat.exists
+      register: jboss_tomcat_version
+      ignore_errors: yes
+
+   # - name: Get Alfresco Tomcat version
+    #  shell: sh /opt/alfresco/tomcat/bin/version.sh | grep "Server version" | awk -F': ' '{print $2}'
+
+    - name: Get Alfresco Tomcat version
+      shell: |
+        sh /opt/alfresco/tomcat/bin/version.sh | grep "Server version" | awk -F': ' '{print $2}'
+      when: alfresco_version_file.stat.exists
+      register: alfresco_tomcat_version
+      ignore_errors: yes
+
+    # ---- Combine all info ----
+    - name: Build formatted output block
+      set_fact:
+        formatted_output: |
+          ------------------------------------------
+          Server: {{ hostname_output.stdout }}
+          Installed Versions:
+          {% for f in jboss_dirs.files %}
+          {{ f.path }}
+          {% endfor %}
+          Current Default Version for jboss: {{ jboss_default_target.stdout | default('Not Found') }}
+
+          {% if jboss_version_file.stat.exists %}
+          JBoss Tomcat Directory: /jboss/jbossas/tomcat
+          Tomcat Version: {{ jboss_tomcat_version.stdout | default('Not found') }}
+          {% else %}
+          JBoss Tomcat Directory: Not Found
+          {% endif %}
+
+          {% if alfresco_version_file.stat.exists %}
+          Alfresco Tomcat Directory: /opt/alfresco/tomcat
+          Tomcat Version: {{ alfresco_tomcat_version.stdout | default('Not found') }}
+          {% else %}
+          Alfresco Tomcat Directory: Not Found
+          {% endif %}
+          ------------------------------------------
+
+    - name: Append formatted output to local report file
+      local_action:
+        module: lineinfile
+        path: "{{ local_output_file }}"
+        line: "{{ formatted_output }}"
+        create: yes
+        insertafter: EOF
+      delegate_to: localhost
+      run_once: false
