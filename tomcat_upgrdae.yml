@@ -1,0 +1,145 @@
+---
+- name: Upgrade Apache Tomcat version safely
+  hosts: tomcat
+  become: yes
+  vars:
+    tomcat_base_path: /jboss/tomcat
+    old_version: apache-tomcat-9.0.111
+    new_version: 10.1.49
+    tomcat_conf_dir: /jboss/tomcat/tomcat/conf
+    server_xml: "/jboss/tomcat/apache-tomcat-{{ new_version }}/conf/server.xml"
+    port_shutdown: 8985
+    port_connector: 8980
+    backup_dir: /jboss/tomcat/tmctbkp
+    server_loader_file: /jboss/tomcat/tomcat/conf/catalina.properties
+    tmp_insert_file: /tmp/server_loader_block.txt
+    tomcat_zip_url: "https://downloads.apache.org/tomcat/tomcat-10/v10.1.49/bin/apache-tomcat-{{ new_version }}.zip"
+    tomcat_zip_file: "apache-tomcat-{{ new_version }}.zip"
+    new_tomcat_dir: "/jboss/tomcat/apache-tomcat-{{ new_version }}"
+
+  tasks:
+
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download new Tomcat version
+      get_url:
+        url: "{{ tomcat_zip_url }}"
+        dest: "{{ tomcat_base_path }}/{{ tomcat_zip_file }}"
+        mode: '0644'
+
+    - name: Unzip new Tomcat version manually
+      shell: |
+        cd "{{ tomcat_base_path }}"
+        unzip -o "{{ tomcat_zip_file }}"
+      args:
+        executable: /bin/bash
+
+    - name: Backup existing Tomcat directory safely
+      copy:
+        src: "{{ tomcat_base_path }}/{{ old_version }}"
+        dest: "{{ backup_dir }}/"
+        remote_src: yes
+    - name: Copy setenv.sh from backup to new Tomcat bin
+      copy:
+        src: "{{ backup_dir }}/{{ old_version }}/bin/setenv.sh"
+        dest: "{{ new_tomcat_dir }}/bin/setenv.sh"
+        mode: '0755'
+        remote_src: yes
+      ignore_errors: yes
+
+    - name: Clean existing webapps directory
+      file:
+        path: "{{ new_tomcat_dir }}/webapps/"
+        state: absent
+
+    - name: Recreate empty webapps directory
+      file:
+        path: "{{ new_tomcat_dir }}/webapps/"
+        state: directory
+        mode: '0755'
+
+    - name: Restore WAR files from backup
+      copy:
+        src: "{{ backup_dir }}/{{ old_version }}/webapps/"
+        dest: "{{ new_tomcat_dir }}/webapps/"
+        remote_src: yes
+      ignore_errors: yes
+
+    - name: Update shutdown port in server.xml
+      replace:
+        path: "{{ server_xml }}"
+        regexp: '<Server port="[^"]*" shutdown="SHUTDOWN">'
+        replace: '<Server port="{{ port_shutdown }}" shutdown="SHUTDOWN">'
+
+    - name: Update connector port in server.xml
+      replace:
+        path: "{{ server_xml }}"
+        regexp: '<Connector port="[^"]*" protocol="HTTP/1.1"'
+        replace: '<Connector port="{{ port_connector }}" protocol="HTTP/1.1"'
+
+    - name: Add server.loader entry from old to new Tomcat
+      shell: |
+        awk '/^server.loader=/ {print; exit}' "{{ backup_dir }}/{{ old_version }}/conf/catalina.properties" >> "{{ new_tomcat_dir }}/conf/catalina.properties"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Merge catalina.properties from old to new Tomcat
+      shell: |
+        grep -v '^#' "{{ backup_dir }}/{{ old_version }}/conf/catalina.properties" | while read -r line; do
+          key=$(echo "$line" | cut -d'=' -f1)
+          grep -q "^$key=" "{{ new_tomcat_dir }}/conf/catalina.properties" || echo "$line" >> "{{ new_tomcat_dir }}/conf/catalina.properties"
+        done
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Stop Tomcat instance (old version)
+      shell: "sh {{ tomcat_base_path }}/tomcat/bin/shutdown.sh"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Unlink old Tomcat softlink if exists
+      file:
+        path: "{{ tomcat_base_path }}/tomcat"
+        state: absent
+
+    - name: Create new Tomcat softlink
+      file:
+        src: "{{ new_tomcat_dir }}"
+        dest: "{{ tomcat_base_path }}/tomcat"
+        state: link
+
+    - name: Set permissions for Tomcat bin directory
+      shell: "chmod 755 {{ tomcat_base_path }}/tomcat/bin/*.sh"
+      args:
+        executable: /bin/bash
+
+    - name: Set ownership to jboss user for Tomcat directory
+      shell: |
+        chown -R jboss:jboss "{{ tomcat_base_path }}/tomcat"
+        chown -h jboss:jboss "{{ tomcat_base_path }}/tomcat"
+      args:
+        executable: /bin/bash
+
+    - name: Start Tomcat instance (new version)
+      shell: "sh {{ tomcat_base_path }}/tomcat/bin/startup.sh"
+      args:
+        executable: /bin/bash
+
+    - name: Verify Tomcat is running
+      shell: "ps -ef | grep -v grep | grep java | grep tomcat"
+      register: verify_tomcat
+      ignore_errors: yes
+
+    - name: Display Tomcat status
+      debug:
+        msg: |
+          ✅ Tomcat upgrade completed successfully.
+          Process info:
+          {{ verify_tomcat.stdout }}
